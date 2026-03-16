@@ -1,0 +1,29 @@
+{
+  "name": "ttno",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/agent.ts",
+  "scripts": {
+    "start": "npx tsx src/server.ts",
+    "dev": "npx tsx watch src/server.ts",
+    "adk": "npx adk web"
+  },
+  "dependencies": {
+    "@google/adk": "^0.5.0",
+    "@mozilla/readability": "^0.5.0",
+    "dotenv": "^17.3.1",
+    "express": "^5.1.0",
+    "jsdom": "^26.0.0",
+    "turndown": "^7.2.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@google/adk-devtools": "^0.5.0",
+    "@types/express": "^5.0.0",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.0.0",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^5.9.3",
+    "tsx": "^4.19.0"
+  }
+}
