@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
+import Particles from "@/components/Particles";
 
 // ============================================================================
 // Types
@@ -19,6 +20,40 @@ interface ApiResult {
   originalUrl: string;
   notionUrl?: string;
   error?: string;
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+/**
+ * URL에서 ${start:end} 패턴을 감지하고 확장된 URL 배열을 반환
+ * 예: https://example.com/page=${1:5} → 5개 URL 생성
+ */
+function expandUrlRange(url: string): string[] {
+  const rangePattern = /\$\{(\d+):(\d+)\}/g;
+  const match = rangePattern.exec(url);
+
+  if (!match) {
+    return [url];
+  }
+
+  const start = parseInt(match[1], 10);
+  const end = parseInt(match[2], 10);
+
+  if (isNaN(start) || isNaN(end) || start > end) {
+    return [url];
+  }
+
+  const maxRange = 100;
+  const actualEnd = Math.min(end, start + maxRange - 1);
+
+  const urls: string[] = [];
+  for (let i = start; i <= actualEnd; i++) {
+    urls.push(url.replace(match[0], String(i)));
+  }
+
+  return urls;
 }
 
 // ============================================================================
@@ -129,6 +164,22 @@ function IconNotion({ className = "w-4 h-4" }: { className?: string }) {
   );
 }
 
+function IconDocument({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+    </svg>
+  );
+}
+
+function IconSummary({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16m-7 6h7" />
+    </svg>
+  );
+}
+
 function Spinner({ className = "w-5 h-5" }: { className?: string }) {
   return (
     <svg className={`${className} animate-spin`} fill="none" viewBox="0 0 24 24">
@@ -142,22 +193,32 @@ function Spinner({ className = "w-5 h-5" }: { className?: string }) {
 // Page Component
 // ============================================================================
 
+type ProcessMode = "translate" | "translate_summary";
+
 export default function Home() {
   const [inputUrl, setInputUrl] = useState("");
   const [urlItems, setUrlItems] = useState<UrlItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [mode, setMode] = useState<ProcessMode>("translate");
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const addUrl = useCallback(() => {
     const trimmedUrl = inputUrl.trim();
     if (!trimmedUrl) return;
 
-    const newItem: UrlItem = {
-      id: `${Date.now()}_${Math.random().toString(36).substring(7)}`,
-      url: trimmedUrl.startsWith("http") ? trimmedUrl : `https://${trimmedUrl}`,
-      status: "pending",
-    };
+    const normalizedUrl = trimmedUrl.startsWith("http")
+      ? trimmedUrl
+      : `https://${trimmedUrl}`;
 
-    setUrlItems((prev) => [...prev, newItem]);
+    const expandedUrls = expandUrlRange(normalizedUrl);
+
+    const newItems: UrlItem[] = expandedUrls.map((url, index) => ({
+      id: `${Date.now()}_${index}_${Math.random().toString(36).substring(7)}`,
+      url,
+      status: "pending",
+    }));
+
+    setUrlItems((prev) => [...prev, ...newItems]);
     setInputUrl("");
   }, [inputUrl]);
 
@@ -168,6 +229,12 @@ export default function Home() {
   const processUrls = useCallback(async () => {
     const pendingItems = urlItems.filter((item) => item.status === "pending");
     if (pendingItems.length === 0) return;
+
+    // 이전 요청 취소
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
 
     setIsProcessing(true);
 
@@ -183,7 +250,9 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           urls: pendingItems.map((item) => item.url),
+          mode: mode,
         }),
+        signal: abortControllerRef.current.signal,
       });
 
       const data = await response.json();
@@ -220,6 +289,18 @@ export default function Home() {
         );
       }
     } catch (error) {
+      // 취소된 요청은 에러 처리하지 않음
+      if (error instanceof Error && error.name === "AbortError") {
+        setUrlItems((prev) =>
+          prev.map((item) =>
+            item.status === "processing"
+              ? { ...item, status: "pending" }
+              : item
+          )
+        );
+        return;
+      }
+
       const errorMessage = error instanceof Error ? error.message : "Network error";
       setUrlItems((prev) =>
         prev.map((item) =>
@@ -230,8 +311,15 @@ export default function Home() {
       );
     } finally {
       setIsProcessing(false);
+      abortControllerRef.current = null;
     }
-  }, [urlItems]);
+  }, [urlItems, mode]);
+
+  const cancelProcessing = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  }, []);
 
   const clearCompleted = useCallback(() => {
     setUrlItems((prev) =>
@@ -239,30 +327,55 @@ export default function Home() {
     );
   }, []);
 
-  const pendingCount = urlItems.filter((item) => item.status === "pending").length;
-  const processingCount = urlItems.filter((item) => item.status === "processing").length;
-  const completedCount = urlItems.filter((item) => item.status === "completed" || item.status === "error").length;
+  // 카운트 계산 최적화 (단일 순회)
+  const { pendingCount, processingCount, completedCount } = useMemo(() => {
+    let pending = 0;
+    let processing = 0;
+    let completed = 0;
+
+    for (const item of urlItems) {
+      switch (item.status) {
+        case "pending":
+          pending++;
+          break;
+        case "processing":
+          processing++;
+          break;
+        case "completed":
+        case "error":
+          completed++;
+          break;
+      }
+    }
+
+    return { pendingCount: pending, processingCount: processing, completedCount: completed };
+  }, [urlItems]);
 
   return (
-    <div className="min-h-screen gradient-bg">
-      {/* Decorative Elements */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-indigo-500/10 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-violet-500/10 rounded-full blur-3xl" />
-      </div>
+    <div className="min-h-screen bg-slate-950 relative overflow-hidden">
+      {/* Particles Background */}
+      <Particles
+        particleCount={100}
+        particleSize={2}
+        particleColor="rgba(139, 92, 246, 0.8)"
+        lineColor="rgba(99, 102, 241, 0.2)"
+        lineDistance={120}
+        moveSpeed={0.6}
+        cursorInteraction={true}
+        cursorRadius={180}
+      />
 
-      <div className="relative z-10 py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-2xl mx-auto">
+      <div className="relative z-10 min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div className="w-full max-w-2xl">
           {/* Header */}
           <header className="text-center mb-12">
             <h1 className="text-4xl font-bold bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-600 dark:from-indigo-400 dark:via-violet-400 dark:to-indigo-400 bg-clip-text text-transparent">
-              TTNO
             </h1>
           </header>
 
           {/* Input Section */}
           <div className="glass rounded-2xl shadow-xl shadow-slate-200/50 dark:shadow-slate-900/50 p-6 mb-8">
-            <div className="flex gap-3">
+            <div className="flex gap-3 mb-4">
               <div className="flex-1 relative">
                 <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
                   <IconLink className="w-5 h-5 text-slate-400" />
@@ -272,7 +385,15 @@ export default function Home() {
                   value={inputUrl}
                   onChange={(e) => setInputUrl(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") addUrl();
+                    if (e.key === "Enter") {
+                      if (e.ctrlKey || e.metaKey) {
+                        if (!isProcessing && pendingCount > 0) {
+                          processUrls();
+                        }
+                      } else {
+                        addUrl();
+                      }
+                    }
                   }}
                   placeholder="URL을 입력하세요"
                   className="w-full pl-12 pr-4 py-4 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl
@@ -298,6 +419,44 @@ export default function Home() {
                 <IconPlus className="w-5 h-5 transition-transform group-hover:rotate-90" />
                 <span className="hidden sm:inline">추가</span>
               </button>
+            </div>
+
+            {/* Hint & Mode Selector */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                  {"${1:20}"}
+                </span>
+                {" "}범위 추가 ·
+                <span className="font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                  Ctrl+Enter
+                </span>
+                {" "}번역 시작
+              </p>
+              <div className="inline-flex rounded-full bg-slate-100 dark:bg-slate-800/80 p-0.5">
+                <button
+                  onClick={() => setMode("translate")}
+                  className={`flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full transition-smooth ${
+                    mode === "translate"
+                      ? "bg-indigo-500 text-white shadow-sm"
+                      : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300"
+                  }`}
+                >
+                  <IconDocument className="w-3 h-3" />
+                  전체
+                </button>
+                <button
+                  onClick={() => setMode("translate_summary")}
+                  className={`flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-full transition-smooth ${
+                    mode === "translate_summary"
+                      ? "bg-indigo-500 text-white shadow-sm"
+                      : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300"
+                  }`}
+                >
+                  <IconSummary className="w-3 h-3" />
+                  요약
+                </button>
+              </div>
             </div>
           </div>
 
@@ -338,33 +497,33 @@ export default function Home() {
                         정리
                       </button>
                     )}
-                    <button
-                      onClick={processUrls}
-                      disabled={isProcessing || pendingCount === 0}
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-600
-                                 hover:from-emerald-600 hover:to-teal-700 text-white rounded-lg text-sm font-medium
-                                 shadow-lg shadow-emerald-500/25
-                                 disabled:from-slate-300 disabled:to-slate-400 disabled:shadow-none disabled:cursor-not-allowed
-                                 transition-smooth"
-                    >
-                      {isProcessing ? (
-                        <>
-                          <Spinner className="w-4 h-4" />
-                          처리 중...
-                        </>
-                      ) : (
-                        <>
-                          <IconPlay className="w-4 h-4" />
-                          번역 시작
-                        </>
-                      )}
-                    </button>
+                    {isProcessing ? (
+                      <button
+                        onClick={cancelProcessing}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-smooth
+                                   bg-red-500 hover:bg-red-600 text-white"
+                      >
+                        <IconX className="w-4 h-4" />
+                        취소
+                      </button>
+                    ) : (
+                      <button
+                        onClick={processUrls}
+                        disabled={pendingCount === 0}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-smooth
+                                   bg-indigo-500 hover:bg-indigo-600 text-white
+                                   disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed"
+                      >
+                        <IconPlay className="w-4 h-4" />
+                        번역 시작
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
 
               {/* Queue Items */}
-              <div className="divide-y divide-slate-200/50 dark:divide-slate-700/50">
+              <div className="divide-y divide-slate-200/50 dark:divide-slate-700/50 max-h-80 overflow-y-auto">
                 {urlItems.map((item) => (
                   <UrlItemCard
                     key={item.id}
