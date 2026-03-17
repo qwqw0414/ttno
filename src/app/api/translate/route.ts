@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTranslatorService, TranslateResult } from "@/lib/agent";
+import { getTranslatorService, TranslateResult, ProcessMode } from "@/lib/agent";
 
 export const maxDuration = 300;
 
 interface TranslateRequest {
   urls: string[];
+  mode?: ProcessMode;
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body: TranslateRequest = await request.json();
-    const { urls } = body;
+    const { urls, mode = "translate" } = body;
 
     if (!urls || !Array.isArray(urls) || urls.length === 0) {
       return NextResponse.json(
@@ -41,7 +42,7 @@ export async function POST(request: NextRequest) {
 
     const service = getTranslatorService();
     const results: TranslateResult[] =
-      await service.translateMultiple(normalizedUrls);
+      await service.translateMultiple(normalizedUrls, mode);
 
     return NextResponse.json({
       success: true,
